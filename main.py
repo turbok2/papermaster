@@ -42,8 +42,9 @@ def prepare_context(query):
     return context_text
     
 varRagDir="db11"
+rag_flag = False
 st.set_page_config(page_title="ChatGPT with Paper", page_icon="🦜")
-st.title("🦜 ChatGPT with Paper")
+st.title("🦜 ChatGPT with Paper  📝" )
 
 # API KEY 설정
 os.environ['OPENAI_API_KEY'] = st.secrets["OPENAI_API_KEY"]
@@ -113,18 +114,21 @@ def save_pdf_to_db(uploaded_file):
 
 with st.sidebar:
     #파일 업로드
-    st.subheader('논문 파일 업로드')
+    st.subheader('📝 논문 파일 업로드')
     uploaded_file = st.file_uploader('파일 선택')
 
     if uploaded_file is not None:
-        st.write('논문 파일을 업로드 완료.')
         vectorstore = save_pdf_to_db(uploaded_file)
-        
+        st.write('논문 파일 업로드 완료.')
+        st.info(uploaded_file.name)
     else:
         st.write('논문 파일을 업로드하세요.')
         vectorstore = Chroma(persist_directory=varRagDir, embedding_function=OpenAIEmbeddings())
     retriever = vectorstore.as_retriever()
- 
+    st.write('---')
+    if st.checkbox('Using RAG'):
+        rag_flag = True    
+        st.info('읽어둔 논문 pdf 내용을 기반으로 답변합니다.')
     st.write('---')
     session_id =  st.text_input("Session_ID", value='abc123')
 
@@ -160,65 +164,81 @@ if user_input := st.chat_input("메시지를 입력해주세요."):
         llm = ChatOpenAI(streaming=True, callbacks=[stream_handler],
                          model_name="gpt-3.5-turbo", 
                         temperature=0)
+#학습된 문서내에서 답변해 주세요. 학습된 문서내의 질문이 아니면 '질문하신 내용은 이 논문과 관련이 없습니다. '라고 대답해 주세요.
+        if rag_flag:
+            # 2. 프롬프트 생성
+            template = """ 
+            학습된 문서내에서 답변해 주세요.
+            {context}
+            Question: {question}
+            Answer:"""        
+            prompt = PromptTemplate.from_template(template)
+            chain = ( #prompt | llm
+                {"context":  RunnablePassthrough(), "question": RunnablePassthrough()} 
+                # {"context":  retriever, "question": RunnablePassthrough()} 
+                # | (prompt|log_step_output) # debug
+                | prompt
+                # |  (llm|log_step_output) # debug
+                |  llm
 
-        # # 2. 프롬프트 생성
-        # prompt = ChatPromptTemplate.from_messages(
-        #     [
-        #         (
-        #             "system",
-        #             "당신은 대학교수로 학생들의 논문지도를 50년 이상 해오고 있습니다. 대학원생들의 질문에 정확하고 상세하게 답변해 주세요.",
-        #         ),
-        #         # 대화 기록을 변수로 사용, history 가 MessageHistory 의 key 가 됨
-        #         MessagesPlaceholder(variable_name="history"),
-        #         ("human", "{question}"),  # 사용자 질문을 입력
-        #     ]
-        # )
-        # chain = prompt | llm  # 프롬프트와 모델을 연결하여 runnable  객체 생성
-        template = """ 
-        학습된 문서내에서 존대말로 답변해 주세요 학습된 문서내의 질문이 아니면 '질문하신 내용은 업무와 관련이 없습니다. '라고 대답해 주세요.
-        {context}
-        Question: {question}
-        Answer:"""
-        
-        prompt = PromptTemplate.from_template(template)
-        
-
-        chain = ( #prompt | llm
-            {"context":  RunnablePassthrough(), "question": RunnablePassthrough()} 
-            # {"context":  retriever, "question": RunnablePassthrough()} 
-            | (prompt|log_step_output)
-            |  (llm|log_step_output)
-        )
-        # question="AI바우처가 뭐예요?"
-        # result = chain.invoke(question).content   
-        # print(result)
-
-        # context_text = retriever.retrieve(question=user_input)  # This is just a placeholder for however you retrieve context
-        # print("Retrieved context: ", context_text)
-        docs = retriever.get_relevant_documents(user_input)
-        print(docs[0])
-        
-        chain_with_memory = (
-            RunnableWithMessageHistory(  # RunnableWithMessageHistory 객체 생성
-                chain,  # 실행할 Runnable 객체
-                get_session_history,  # 세션 기록을 가져오는 함수
-                input_messages_key="question",  # 사용자 질문의 키
-                history_messages_key="history",  # 기록 메시지의 키
             )
-        )
-        # print('chain_with_memory: ')
-        # print(chain_with_memory)
-        
-        response = chain_with_memory.invoke(
-            # {"question": user_input},
-            {"context":  docs[0], "question": user_input},
-            # 세션 ID 설정
-            config={"configurable": {"session_id": session_id}},
-        )
-        # print('response: ')
-        # print(response)
-        print("Response from the model:", response.content)
-        
+            # question="AI바우처가 뭐예요?"
+            # result = chain.invoke(question).content   
+            # print(result)
+            docs = retriever.get_relevant_documents(user_input)
+            print(len(docs))
+            # print( docs[0])
+
+            
+            chain_with_memory = (
+                RunnableWithMessageHistory(  # RunnableWithMessageHistory 객체 생성
+                    chain,  # 실행할 Runnable 객체
+                    get_session_history,  # 세션 기록을 가져오는 함수
+                    input_messages_key="question",  # 사용자 질문의 키
+                    history_messages_key="history",  # 기록 메시지의 키
+                )
+            )
+            # print('chain_with_memory: ')
+            # print(chain_with_memory)
+            
+            response = chain_with_memory.invoke(
+                # {"question": user_input},
+                {"context":  docs, "question": user_input},
+                # 세션 ID 설정
+                config={"configurable": {"session_id": session_id}},
+            )
+            # print('response: ')
+            # print(response)
+            # print("Response from the model:", response.content)
+        else:
+            # 2. 프롬프트 생성
+            prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        "당신은 대학교수로 학생들의 논문지도를 50년 이상 해오고 있습니다. 대학원생들의 질문에 정확하고 상세하게 답변해 주세요.",
+                    ),
+                    # 대화 기록을 변수로 사용, history 가 MessageHistory 의 key 가 됨
+                    MessagesPlaceholder(variable_name="history"),
+                    ("human", "{question}"),  # 사용자 질문을 입력
+                ]
+            )
+            chain = prompt | llm  # 프롬프트와 모델을 연결하여 runnable  객체 생성
+            chain_with_memory = (
+                RunnableWithMessageHistory(  # RunnableWithMessageHistory 객체 생성
+                    chain,  # 실행할 Runnable 객체
+                    get_session_history,  # 세션 기록을 가져오는 함수
+                    input_messages_key="question",  # 사용자 질문의 키
+                    history_messages_key="history",  # 기록 메시지의 키
+                )
+            )
+
+            response = chain_with_memory.invoke(
+                {"question": user_input},
+                # 세션 ID 설정
+                config={"configurable": {"session_id": session_id}},
+            )
+
         msg = response.content    
 
         st.session_state["messages"].append(ChatMessage(role="assistant", content=response.content))
